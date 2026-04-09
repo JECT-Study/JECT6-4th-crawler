@@ -23,6 +23,7 @@ class Campaign(BaseModel):
     category_text: Optional[str] = None
     media_text: Optional[str] = None
     order_text: Optional[str] = None
+    content_text: Optional[str] = None
 
     raw_snapshot_path: Optional[str] = None
     collected_at: datetime = Field(default_factory=datetime.now)
