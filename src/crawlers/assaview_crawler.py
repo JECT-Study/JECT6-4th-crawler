@@ -13,11 +13,112 @@ TYPE_PATTERN = re.compile(r"(배송형|방문형|구매형|기자단)")
 DEADLINE_PATTERN = re.compile(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}|\d+일 남음")
 APPLY_PATTERN = re.compile(r"신청\s*(\d+)\s*/\s*(\d+)명")
 POINT_PATTERN = re.compile(r"(\d[\d,]*)P")
-REGION_PATTERN = re.compile(r"\[([^\]]+)\]")
+BRACKET_PATTERN = re.compile(r"\[([^\]]+)\]")
+
+LOCATION_KEYWORDS = [
+    "서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종",
+    "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+]
+
+NOISY_TITLE_PREFIXES = [
+    "구매키워드",
+    "캠페인명",
+    "제품명",
+    "제품명 :",
+    "캠페인명 :",
+]
+
+GENERIC_TITLE_VALUES = {
+    "구매키워드",
+    "구매키워드:",
+    "캠페인명",
+    "캠페인명:",
+    "제품명",
+    "제품명:",
+}
+
+
+def normalize_text(text: str) -> str:
+    return " ".join(text.split()).strip()
+
+
+def is_region_text(value: str | None) -> bool:
+    if not value:
+        return False
+    return any(keyword in value for keyword in LOCATION_KEYWORDS)
+
+
+def clean_leading_labels(text: str) -> str:
+    text = normalize_text(text)
+
+    # 앞쪽 라벨 제거
+    for prefix in NOISY_TITLE_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip(" :")
+            text = normalize_text(text)
+
+    # 중간에 '제품명 :' 같은 라벨이 나오는 경우 뒤쪽만 사용
+    for marker in ["제품명 :", "제품명:", "캠페인명 :", "캠페인명:", "구매키워드 :", "구매키워드:"]:
+        if marker in text:
+            parts = text.split(marker, 1)
+            if len(parts) == 2 and parts[1].strip():
+                text = normalize_text(parts[1])
+
+    return text
+
+
+def split_title_and_benefit(text: str) -> tuple[str | None, str | None]:
+    """
+    가장 단순한 1차 분리:
+    - 너무 긴 문장이면 앞쪽 짧은 제목 후보 + 뒤쪽 혜택
+    - 아니면 전체를 제목으로 둠
+    """
+    text = clean_leading_labels(text)
+    if not text:
+        return None, None
+
+    # 명확한 구분자 우선
+    for sep in [" - ", " / ", " | "]:
+        if sep in text:
+            left, right = text.split(sep, 1)
+            left = clean_leading_labels(left)
+            right = clean_leading_labels(right)
+            if left and right:
+                return left, right
+
+    # 첫 문장이 너무 길면 제목을 다시 선택
+    words = text.split()
+    if len(words) >= 4:
+        # 너무 짧은 브랜드명만 제목이 되지 않게 전체를 제목 후보로 유지
+        return text, None
+
+    return text, None
+
+
+def choose_better_title(title: str | None, benefit: str | None) -> tuple[str | None, str | None]:
+    title = normalize_text(title or "")
+    benefit = normalize_text(benefit or "")
+
+    if not title and benefit:
+        return benefit, None
+
+    # 제목이 라벨/일반어면 benefit를 제목으로 승격
+    if title in GENERIC_TITLE_VALUES and benefit:
+        return benefit, None
+
+    # 제목이 너무 짧고 benefit가 더 구체적이면 benefit를 제목으로 사용
+    if title and len(title) <= 4 and benefit and len(benefit) >= 8:
+        return benefit, None
+
+    # 제목에 불필요한 대괄호 태그만 있으면 benefit로 교체
+    if title.startswith("[") and title.endswith("]") and benefit:
+        return benefit, None
+
+    return title or None, benefit or None
 
 
 def parse_assaview_card_text(card_text: str) -> dict:
-    text = " ".join(card_text.split())
+    text = normalize_text(card_text)
 
     campaign_type = None
     deadline_text = None
@@ -45,40 +146,54 @@ def parse_assaview_card_text(card_text: str) -> dict:
     if point_match:
         point_text = point_match.group(1).replace(",", "")
 
-    region_match = REGION_PATTERN.search(text)
-    if region_match:
-        region_text = region_match.group(1)
+    bracket_match = BRACKET_PATTERN.search(text)
+    bracket_value = bracket_match.group(1).strip() if bracket_match else None
+    if is_region_text(bracket_value):
+        region_text = bracket_value
 
     working = text
 
+    # 불필요한 공통 메타 제거
     if campaign_type:
         working = working.replace(campaign_type, "", 1)
     if deadline_text:
         working = working.replace(deadline_text, "", 1)
 
-    # 신청 이후 텍스트 제거
     apply_match_working = APPLY_PATTERN.search(working)
     if apply_match_working:
         working = working[:apply_match_working.start()].strip()
 
-    # 포인트 제거
     if point_match:
         working = working.replace(point_match.group(0), "").strip()
 
-    # [지역] 뒤 첫 문장을 제목으로 추정
+    # 지역 대괄호는 제거
     if region_text and f"[{region_text}]" in working:
-        after_region = working.split(f"[{region_text}]", 1)[1].strip()
-        parts = after_region.split(" ", 1)
-        if parts:
-            campaign_title = parts[0].strip()
+        working = working.replace(f"[{region_text}]", "", 1).strip()
+
+    working = clean_leading_labels(working)
+
+    # 방문형은 지역 뒤에 매장명 + 혜택이 오는 경우가 많음
+    if campaign_type == "방문형":
+        if working:
+            # 첫 덩어리를 제목 후보로 사용
+            parts = working.split(" ", 1)
+            campaign_title = clean_leading_labels(parts[0])
             if len(parts) > 1:
-                benefit_text = parts[1].strip()
+                benefit_text = clean_leading_labels(parts[1])
+
+            # 제목이 지역명/너무 짧은 일반어면 benefit에서 다시 뽑기
+            campaign_title, benefit_text = choose_better_title(campaign_title, benefit_text)
     else:
-        parts = working.split(" ", 1)
-        if parts:
-            campaign_title = parts[0].strip()
-            if len(parts) > 1:
-                benefit_text = parts[1].strip()
+        campaign_title, benefit_text = split_title_and_benefit(working)
+        campaign_title, benefit_text = choose_better_title(campaign_title, benefit_text)
+
+    # region_text가 잘못 잡히는 경우 방지
+    if region_text and not is_region_text(region_text):
+        region_text = None
+
+    # benefit_text가 제목과 동일하면 제거
+    if campaign_title and benefit_text and campaign_title == benefit_text:
+        benefit_text = None
 
     return {
         "campaign_type": campaign_type,
@@ -87,7 +202,7 @@ def parse_assaview_card_text(card_text: str) -> dict:
         "recruit_count_text": recruit_count_text,
         "point_text": point_text,
         "region_text": region_text,
-        "campaign_title": campaign_title or working,
+        "campaign_title": campaign_title,
         "benefit_text": benefit_text,
     }
 
@@ -118,7 +233,7 @@ class AssaViewCrawler(BaseCrawler):
                 if not text:
                     continue
 
-                # 캠페인 카드처럼 보이는 텍스트만
+                # 캠페인 카드처럼 보이는 것만 수집
                 if not any(keyword in text for keyword in ["신청", "배송형", "방문형", "구매형", "기자단"]):
                     continue
 
