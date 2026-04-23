@@ -1,22 +1,22 @@
-from src.crawlers.reviewnote_crawler import ReviewNoteCrawler
-from src.crawlers.gugudas_crawler import GugudasCrawler
+from src.crawlers.assaview_crawler import AssaViewCrawler
+from src.crawlers.stylec_crawler import StyleCCrawler
 from src.repositories.campaign_repository import save_campaigns_csv
 from src.views.cli_view import print_summary
 
 
 class CrawlController:
-    def run_reviewnote(self):
-        crawler = ReviewNoteCrawler()
+    def run_assaview(self):
+        crawler = AssaViewCrawler()
         campaigns = crawler.crawl()
-        output = save_campaigns_csv("reviewnote_campaigns.csv", campaigns)
-        print_summary("reviewnote", len(campaigns), output)
+        output = save_campaigns_csv("assaview_campaigns.csv", campaigns)
+        print_summary("assaview", len(campaigns), output)
 
-    def run_gugudas(self):
-        crawler = GugudasCrawler()
+    def run_stylec(self):
+        crawler = StyleCCrawler()
         campaigns = crawler.crawl()
-        output = save_campaigns_csv("gugudas_campaigns.csv", campaigns)
-        print_summary("gugudas", len(campaigns), output)
+        output = save_campaigns_csv("stylec_campaigns.csv", campaigns)
+        print_summary("stylec", len(campaigns), output)
 
     def run_all(self):
-        self.run_reviewnote()
-        self.run_gugudas()
+        self.run_assaview()
+        self.run_stylec()
