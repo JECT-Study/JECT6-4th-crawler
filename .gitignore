@@ -2,5 +2,13 @@ __pycache__/
 *.pyc
 .venv
 .env
+
+# data
 data/raw/
 data/output/
+data/diagnose/
+
+# local scripts
+scripts/site_diagnose.py
+
+.DS_Store
