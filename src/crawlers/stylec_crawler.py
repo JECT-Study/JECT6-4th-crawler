@@ -1,273 +1,193 @@
+import json
 import re
-from urllib.parse import urlencode, urljoin
+from typing import Optional
+from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright
+from loguru import logger
 
 from src.config.settings import settings
 from src.crawlers.base_crawler import BaseCrawler
 from src.models.campaign import Campaign
 from src.repositories.raw_repository import save_html
 
+BASE_URL = "https://www.stylec.co.kr/"
+API_BASE = "https://api2.stylec.co.kr:6439/v1/trial"
 
-DEADLINE_PATTERN = re.compile(r"(오늘마감|\d+일 남음)")
-APPLY_PATTERN = re.compile(r"신청\s*([\d,]+)명?\s*/\s*([\d,]+)명")
-PRICE_PATTERN = re.compile(r"실구매가\s*([\d,]+원)")
-REGION_PREFIX_PATTERN = re.compile(r"^(배달|방문)\s*·\s*([^\s]+)")
-BRACKET_PATTERN = re.compile(r"\[([^\]]+)\]")
-
-
-REMOVE_WORDS = [
-    "구매평",
-    "기자단",
-    "제공형",
-    "페이백",
-    "배송형",
-    "방문형",
-    "오늘마감",
-    "네이버블로그",
-]
-
-INVALID_TITLES = {
-    "",
-    "신청",
-    "실구매가",
-    "제공형",
-    "기자단",
-    "구매평",
-    "오늘마감",
-    "남음",
+TYPE_MAP = {
+    "제공형": "DELIVERY",
+    "배송형": "DELIVERY",
+    "방문형": "VISIT",
+    "기자단": "REPORTER",
+    "구매평": "REVIEW",
+    "페이백": "PAYBACK",
+    "페이백 + 구매평": "PAYBACK",
 }
 
+CATEGORY_MAP = {
+    "식품": "FOOD", "푸드": "FOOD", "음식": "FOOD",
+    "뷰티": "BEAUTY", "화장품": "BEAUTY",
+    "패션": "FASHION", "의류": "FASHION",
+    "생활": "LIFE", "가전": "LIFE", "가구": "LIFE",
+    "펫": "PET", "반려": "PET",
+    "테크": "TECH", "IT": "TECH",
+    "여행": "TRAVEL", "숙박": "TRAVEL",
+    "문화": "CULTURE",
+}
 
-def normalize_text(text: str) -> str:
-    return " ".join(text.split()).strip()
-
-
-def build_stylec_url(page_number: int) -> str:
-    query = {
-        "sortOption": "wr_last",
-        "pageNumber": page_number,
-        "count": settings.stylec_count,
-        "campaignType": "",
-        "category": "",
-        "region": "",
-        "sns": settings.stylec_sns,
-        "include_finish": "false",
-    }
-    return f"{settings.stylec_base_url}?{urlencode(query)}"
+SKIP_BRAND_WORDS = ["네이버", "쿠팡", "스마트", "배달", "블로그", "리뷰", "체험"]
 
 
-def is_card_like_text(text: str) -> bool:
-    text = normalize_text(text)
-    signals = ["신청", "오늘마감", "일 남음", "실구매가", "제공내역"]
-    return any(signal in text for signal in signals)
+def infer_category(title: str) -> Optional[str]:
+    for keyword, category in CATEGORY_MAP.items():
+        if keyword in title:
+            return category
+    return "ETC"
 
 
-def extract_region(text: str) -> tuple[str | None, str]:
-    text = normalize_text(text)
-    match = REGION_PREFIX_PATTERN.search(text)
-    if not match:
-        return None, text
-
-    region_text = match.group(2).strip()
-    text = text.replace(match.group(0), "", 1).strip()
-    return region_text, normalize_text(text)
-
-
-def extract_apply_counts(text: str) -> tuple[str | None, str | None, str]:
-    text = normalize_text(text)
-    match = APPLY_PATTERN.search(text)
-    if not match:
-        return None, None, text
-
-    apply_count = match.group(1).replace(",", "")
-    recruit_count = match.group(2).replace(",", "")
-    text = text.replace(match.group(0), "", 1).strip()
-    return apply_count, recruit_count, normalize_text(text)
-
-
-def extract_deadline(text: str) -> tuple[str | None, str]:
-    text = normalize_text(text)
-    match = DEADLINE_PATTERN.search(text)
-    if not match:
-        return None, text
-
-    deadline_text = match.group(1)
-    text = text.replace(match.group(0), "", 1).strip()
-    return deadline_text, normalize_text(text)
-
-
-def extract_benefit(text: str) -> tuple[str | None, str]:
-    text = normalize_text(text)
-    match = PRICE_PATTERN.search(text)
-    if not match:
-        return None, text
-
-    benefit_text = match.group(1)
-    text = text.replace(match.group(0), "", 1).strip()
-    return benefit_text, normalize_text(text)
-
-
-def strip_brackets(text: str) -> tuple[list[str], str]:
-    text = normalize_text(text)
-    tags = BRACKET_PATTERN.findall(text)
-    stripped = BRACKET_PATTERN.sub("", text)
-    return [tag.strip() for tag in tags if tag.strip()], normalize_text(stripped)
-
-
-def remove_noise_words(text: str) -> str:
-    text = normalize_text(text)
-
-    changed = True
-    while changed:
-        changed = False
-        for word in REMOVE_WORDS:
-            if text.startswith(word):
-                text = text[len(word):].strip(" +·:-")
-                text = normalize_text(text)
-                changed = True
-
-    return normalize_text(text)
-
-
-def clean_title(text: str) -> str | None:
-    text = normalize_text(text)
-    text = remove_noise_words(text)
-
-    # 중간에 섞인 불필요 문구 제거
-    replacements = [
-        "체험단 모집",
-        "체험단모집",
-        "모집합니다!!",
-        "모집합니다",
-        "모집",
-        "리뷰체험단",
-    ]
-    for item in replacements:
-        text = text.replace(item, "")
-
-    # 제목 끝 가격 숫자 제거
-    text = re.sub(r"\s*[\d,]{3,}$", "", text).strip()
-
-    # 깨진 '남음' 시작 텍스트 제거
-    text = re.sub(r"^남음\s*", "", text).strip()
-
-    text = normalize_text(text)
-
-    if text in INVALID_TITLES:
+def safe_int(value) -> Optional[int]:
+    if value is None:
         return None
-    if len(text) < 2:
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
         return None
 
-    return text
+
+def extract_brand_name(title: str, b2b_company: str = None) -> Optional[str]:
+    # 1. b2b_company 필드
+    if b2b_company:
+        return b2b_company.strip()
+
+    # 2. 제목 앞 대괄호 [브랜드명]
+    m = re.search(r"^\[([^\]]+)\]", title)
+    if m:
+        return m.group(1).strip()
+
+    # 3. (네이버블로그+쿠팡구매평) 같은 채널 패턴은 제외하고 순수 브랜드 소괄호만
+    m = re.search(r"^\(([^+\)]{2,15})\)\s+(.+)", title)
+    if m:
+        candidate = m.group(1).strip()
+        skip = ["네이버", "쿠팡", "블로그", "구매평", "인스타", "유튜브", "배달", "스마트"]
+        if not any(kw in candidate for kw in skip):
+            return candidate
+
+    return None
 
 
-def parse_stylec_card_text(card_text: str) -> dict:
-    raw = normalize_text(card_text)
+def parse_item(item: dict) -> Campaign | None:
+    title = item.get("wr_subject", "").strip()
+    if not title:
+        return None
 
-    region_text, working = extract_region(raw)
-    apply_count_text, recruit_count_text, working = extract_apply_counts(working)
-    deadline_text, working = extract_deadline(working)
-    benefit_text, working = extract_benefit(working)
-    tags, working = strip_brackets(working)
+    link = item.get("link", "")
+    source_url = urljoin(BASE_URL, link) if link else ""
 
-    # 태그가 제목 앞 메타인 경우 제거
-    working = remove_noise_words(working)
+    # type 매핑
+    wr_type = item.get("wr_type_label") or item.get("wr_type", "")
+    campaign_type = TYPE_MAP.get(wr_type, "DELIVERY")
 
-    # 제목 후보 정리
-    campaign_title = clean_title(working)
+    # 인원
+    apply_count = safe_int(item.get("tr_enroll_cnt"))
+    recruit_count = safe_int(item.get("tr_recruit_max"))
 
-    # region이 비어 있는데 태그 안에 지역성 텍스트가 있는 경우 보정
-    if not region_text:
-        for tag in tags:
-            if any(loc in tag for loc in [
-                "서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산",
-                "세종", "강원", "충북", "충남", "전북", "전남", "경북", "경남",
-                "제주", "부천", "의정부", "강남", "명동", "이태원", "용산",
-            ]):
-                region_text = tag
-                break
+    # 제공 내용
+    price = safe_int(item.get("it_price"))
+    cashback = safe_int(item.get("tr_cashback_amt"))
+    if price:
+        provided_content = f"{price:,}원"
+    elif cashback:
+        provided_content = f"{cashback:,}C"
+    else:
+        provided_content = None
 
-    return {
-        "campaign_title": campaign_title,
-        "campaign_type": "블로그",
-        "region_text": region_text,
-        "benefit_text": benefit_text,
-        "deadline_text": deadline_text,
-        "apply_count_text": apply_count_text,
-        "recruit_count_text": recruit_count_text,
-    }
+    # 썸네일
+    thumbnail_url = item.get("img") or None
+
+    # 브랜드명
+    brand_name = extract_brand_name(title, item.get("b2b_company"))
+
+    # 100% 당첨
+    is_guaranteed = bool(
+        recruit_count and apply_count is not None and apply_count < recruit_count
+    )
+
+    return Campaign(
+        source_platform="STYLEC",
+        source_url=source_url,
+        brand_name=brand_name,
+        title=title,
+        thumbnail_url=thumbnail_url,
+        category=infer_category(title),
+        type=campaign_type,
+        channel="BLOG",
+        provided_content=provided_content,
+        recruit_count=recruit_count,
+        apply_count=apply_count,
+        is_guaranteed=is_guaranteed,
+        status="ACTIVE",
+    )
 
 
 class StyleCCrawler(BaseCrawler):
+
     def crawl(self) -> list[Campaign]:
-        campaigns: list[Campaign] = []
+        all_items: list[Campaign] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=settings.headless)
+            context = browser.new_context()
+            page = context.new_page()
 
-            for page_number in range(1, settings.stylec_pages + 1):
-                page_url = build_stylec_url(page_number)
+            logger.info("[stylec] 세션 초기화")
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=settings.timeout_ms)
+            page.wait_for_timeout(2000)
 
-                page = browser.new_page()
-                page.goto(
-                    page_url,
-                    wait_until="domcontentloaded",
-                    timeout=settings.timeout_ms,
-                )
-                page.wait_for_timeout(2500)
+            first_resp = page.evaluate(f"""
+                async () => {{
+                    const res = await fetch('{API_BASE}?order=wr_last&page=1&count=50&snsType[]=naverblog&include_finish=false');
+                    return await res.json();
+                }}
+            """)
 
-                html = page.content()
-                raw_path = save_html(f"stylec_p{page_number}", html)
+            total = first_resp.get("data", {}).get("Total", 0)
+            logger.info(f"[stylec] 총 캠페인 수: {total}")
 
-                links = page.locator("a").all()
+            total_pages = min(settings.stylec_pages, -(-total // 50))
+            if total_pages == 0:
+                total_pages = settings.stylec_pages
 
-                for link in links:
-                    text = link.inner_text().strip()
-                    href = link.get_attribute("href")
+            logger.info(f"[stylec] 수집 페이지 수: {total_pages}")
 
-                    if not text:
-                        continue
+            for p_num in range(1, total_pages + 1):
+                logger.info(f"[stylec] 페이지 {p_num} 수집 중")
 
-                    if not is_card_like_text(text):
-                        continue
+                resp = page.evaluate(f"""
+                    async () => {{
+                        const res = await fetch('{API_BASE}?order=wr_last&page={p_num}&count=50&snsType[]=naverblog&include_finish=false');
+                        return await res.json();
+                    }}
+                """)
 
-                    parsed = parse_stylec_card_text(text)
-                    if not parsed["campaign_title"]:
-                        continue
+                items = resp.get("data", {}).get("data", [])
+                logger.info(f"[stylec] 페이지 {p_num}: {len(items)}개")
 
-                    campaign_url = urljoin(page_url, href) if href else None
+                if not items:
+                    logger.info(f"[stylec] 페이지 {p_num} 빈 결과 — 종료")
+                    break
 
-                    campaigns.append(
-                        Campaign(
-                            source_site="stylec",
-                            source_page_url=page_url,
-                            campaign_title=parsed["campaign_title"],
-                            campaign_url=campaign_url,
-                            campaign_type=parsed["campaign_type"],
-                            region_text=parsed["region_text"],
-                            benefit_text=parsed["benefit_text"],
-                            deadline_text=parsed["deadline_text"],
-                            apply_count_text=parsed["apply_count_text"],
-                            recruit_count_text=parsed["recruit_count_text"],
-                            raw_snapshot_path=raw_path,
-                        )
-                    )
+                save_html(f"stylec_api_p{p_num}", json.dumps(resp, ensure_ascii=False))
 
-                page.close()
+                for item in items:
+                    campaign = parse_item(item)
+                    if campaign:
+                        all_items.append(campaign)
+
+                page.wait_for_timeout(500)
 
             browser.close()
 
-        # 중복 제거 강화
-        unique = {}
-        for item in campaigns:
-            key = (
-                item.campaign_title,
-                item.deadline_text,
-                item.apply_count_text,
-                item.recruit_count_text,
-                item.region_text,
-            )
-            unique[key] = item
-
-        return list(unique.values())
+        unique = {c.source_url: c for c in all_items if c.source_url}
+        result = list(unique.values())
+        logger.info(f"[stylec] 총 {len(result)}개 수집 완료")
+        return result
