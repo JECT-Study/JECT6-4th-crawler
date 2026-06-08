@@ -1,275 +1,221 @@
 import re
 from urllib.parse import urljoin
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page
+from bs4 import BeautifulSoup
+from loguru import logger
 
 from src.config.settings import settings
 from src.crawlers.base_crawler import BaseCrawler
 from src.models.campaign import Campaign
 from src.repositories.raw_repository import save_html
 
+BASE_URL = "https://assaview.co.kr/"
+LIST_URL = "https://assaview.co.kr/campaign_list.php?type=product"
 
-TYPE_PATTERN = re.compile(r"(배송형|방문형|구매형|기자단)")
-DEADLINE_PATTERN = re.compile(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}|\d+일 남음")
-APPLY_PATTERN = re.compile(r"신청\s*(\d+)\s*/\s*(\d+)명")
-POINT_PATTERN = re.compile(r"(\d[\d,]*)P")
-BRACKET_PATTERN = re.compile(r"\[([^\]]+)\]")
+TYPE_MAP = {
+    "배송형": "DELIVERY",
+    "구매형": "REVIEW",
+    "방문형": "VISIT",
+    "기자단": "REPORTER",
+    "리뷰형": "REVIEW",
+}
 
-LOCATION_KEYWORDS = [
-    "서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종",
-    "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
-]
-
-NOISY_TITLE_PREFIXES = [
-    "구매키워드",
-    "캠페인명",
-    "제품명",
-    "제품명 :",
-    "캠페인명 :",
-]
-
-GENERIC_TITLE_VALUES = {
-    "구매키워드",
-    "구매키워드:",
-    "캠페인명",
-    "캠페인명:",
-    "제품명",
-    "제품명:",
+CATEGORY_MAP = {
+    "식품": "FOOD", "푸드": "FOOD", "음식": "FOOD", "빵": "FOOD", "쿠키": "FOOD",
+    "뷰티": "BEAUTY", "화장품": "BEAUTY", "스킨": "BEAUTY", "크림": "BEAUTY",
+    "패션": "FASHION", "의류": "FASHION", "티셔츠": "FASHION", "원피스": "FASHION",
+    "생활": "LIFE", "가전": "LIFE", "가구": "LIFE", "소파": "LIFE", "이불": "LIFE",
+    "펫": "PET", "반려": "PET", "강아지": "PET", "고양이": "PET",
+    "테크": "TECH", "IT": "TECH", "전자": "TECH",
+    "여행": "TRAVEL", "숙박": "TRAVEL", "호텔": "TRAVEL",
+    "문화": "CULTURE",
 }
 
 
-def normalize_text(text: str) -> str:
-    return " ".join(text.split()).strip()
+def infer_category(title: str) -> str:
+    for keyword, category in CATEGORY_MAP.items():
+        if keyword in title:
+            return category
+    return "ETC"
 
 
-def is_region_text(value: str | None) -> bool:
-    if not value:
-        return False
-    return any(keyword in value for keyword in LOCATION_KEYWORDS)
+def extract_cards_from_page(page: Page) -> list[dict]:
+    return page.evaluate("""
+        () => {
+            const results = [];
+            const seen = new Set();
+            const links = document.querySelectorAll('a[href*="campaign.php?cp_id="]');
+
+            links.forEach(a => {
+                const href = a.getAttribute('href');
+                if (!href || seen.has(href)) return;
+                seen.add(href);
+
+                // review_type_icon 제외한 첫 번째 img
+                let thumbSrc = '';
+                const imgs = a.querySelectorAll('img');
+                for (const img of imgs) {
+                    if (img.classList.contains('review_type_icon')) continue;
+                    const src = img.getAttribute('src') || '';
+                    if (src) {
+                        thumbSrc = src.startsWith('./') ? src.slice(2) : src;
+                        break;
+                    }
+                }
+
+                const text = a.innerText || '';
+                results.push({ href, thumbSrc, text });
+            });
+
+            return results;
+        }
+    """)
 
 
-def clean_leading_labels(text: str) -> str:
-    text = normalize_text(text)
+def parse_card_data(card: dict) -> Campaign | None:
+    href = card.get("href", "")
+    if not href:
+        return None
 
-    # 앞쪽 라벨 제거
-    for prefix in NOISY_TITLE_PREFIXES:
-        if text.startswith(prefix):
-            text = text[len(prefix):].strip(" :")
-            text = normalize_text(text)
+    source_url = urljoin(BASE_URL, href)
+    full_text = card.get("text", "").strip()
+    thumb_src = card.get("thumbSrc", "")
 
-    # 중간에 '제품명 :' 같은 라벨이 나오는 경우 뒤쪽만 사용
-    for marker in ["제품명 :", "제품명:", "캠페인명 :", "캠페인명:", "구매키워드 :", "구매키워드:"]:
-        if marker in text:
-            parts = text.split(marker, 1)
-            if len(parts) == 2 and parts[1].strip():
-                text = normalize_text(parts[1])
+    # 썸네일
+    thumbnail_url = urljoin(BASE_URL, thumb_src) if thumb_src else None
 
-    return text
+    # 캠페인 타입
+    type_match = re.search(r"(배송형|구매형|방문형|기자단|리뷰형)", full_text)
+    raw_type = type_match.group(1) if type_match else None
+    campaign_type = TYPE_MAP.get(raw_type, "DELIVERY") if raw_type else "DELIVERY"
 
+    # 마감일
+    deadline = None
+    d_match = re.search(r"(오늘마감|\d+일 남음|마감임박)", full_text)
+    if d_match:
+        deadline = d_match.group(1)
 
-def split_title_and_benefit(text: str) -> tuple[str | None, str | None]:
-    """
-    가장 단순한 1차 분리:
-    - 너무 긴 문장이면 앞쪽 짧은 제목 후보 + 뒤쪽 혜택
-    - 아니면 전체를 제목으로 둠
-    """
-    text = clean_leading_labels(text)
-    if not text:
-        return None, None
+    # 신청/모집 인원
+    apply_count = recruit_count = None
+    a_match = re.search(r"신청\s*([\d,]+)\s*/\s*([\d,]+)\s*명", full_text)
+    if a_match:
+        apply_count = int(a_match.group(1).replace(",", ""))
+        recruit_count = int(a_match.group(2).replace(",", ""))
 
-    # 명확한 구분자 우선
-    for sep in [" - ", " / ", " | "]:
-        if sep in text:
-            left, right = text.split(sep, 1)
-            left = clean_leading_labels(left)
-            right = clean_leading_labels(right)
-            if left and right:
-                return left, right
+    # 포인트/제공 내용
+    provided_content = None
+    p_match = re.search(r"([\d,]+)\s*P(?:\s|$)", full_text)
+    if p_match:
+        provided_content = f"{p_match.group(1)}P"
 
-    # 첫 문장이 너무 길면 제목을 다시 선택
-    words = text.split()
-    if len(words) >= 4:
-        # 너무 짧은 브랜드명만 제목이 되지 않게 전체를 제목 후보로 유지
-        return text, None
+    price_match = re.search(r"\[([\d,]+원)\s*상당\]|\[(배송비 포함[\d,]+원)\]", full_text)
+    if price_match:
+        provided_content = price_match.group(1) or price_match.group(2)
 
-    return text, None
+    # 제목 정제
+    title_text = full_text
+    for pattern in [
+        r"(배송형|구매형|방문형|기자단|리뷰형)",
+        r"(오늘마감|\d+일 남음|마감임박)",
+        r"신청\s*[\d,]+\s*/\s*[\d,]+\s*명",
+        r"[\d,]+\s*P(?:\s|$)",
+        r"참여 조건.*",
+        r"\[배송비 포함[\d,]+원\]",
+        r"\[[\d,]+원 상당\]",
+        r"아싸뷰 원고료",
+    ]:
+        title_text = re.sub(pattern, "", title_text)
+    title_text = re.sub(r"\s+", " ", title_text).strip()
 
+    if len(title_text) < 4:
+        chunks = re.findall(r"[가-힣a-zA-Z0-9 ]{6,}", full_text)
+        chunks = [c.strip() for c in chunks if len(c.strip()) >= 6]
+        chunks = [c for c in chunks if not re.match(
+            r"^(배송형|구매형|방문형|기자단|신청|참여|오늘)", c
+        )]
+        title_text = max(chunks, key=len) if chunks else full_text[:50]
 
-def choose_better_title(title: str | None, benefit: str | None) -> tuple[str | None, str | None]:
-    title = normalize_text(title or "")
-    benefit = normalize_text(benefit or "")
+    if not title_text or len(title_text) < 2:
+        return None
 
-    if not title and benefit:
-        return benefit, None
+    # 브랜드명
+    brand_name = None
+    b_match = re.search(r"^\[([^\]]+)\]", title_text)
+    if b_match:
+        brand_name = b_match.group(1).strip()
 
-    # 제목이 라벨/일반어면 benefit를 제목으로 승격
-    if title in GENERIC_TITLE_VALUES and benefit:
-        return benefit, None
+    # 100% 당첨
+    is_guaranteed = bool(
+        recruit_count and apply_count is not None and apply_count < recruit_count
+    )
 
-    # 제목이 너무 짧고 benefit가 더 구체적이면 benefit를 제목으로 사용
-    if title and len(title) <= 4 and benefit and len(benefit) >= 8:
-        return benefit, None
-
-    # 제목에 불필요한 대괄호 태그만 있으면 benefit로 교체
-    if title.startswith("[") and title.endswith("]") and benefit:
-        return benefit, None
-
-    return title or None, benefit or None
-
-
-def parse_assaview_card_text(card_text: str) -> dict:
-    text = normalize_text(card_text)
-
-    campaign_type = None
-    deadline_text = None
-    apply_count_text = None
-    recruit_count_text = None
-    point_text = None
-    region_text = None
-    campaign_title = None
-    benefit_text = None
-
-    type_match = TYPE_PATTERN.search(text)
-    if type_match:
-        campaign_type = type_match.group(1)
-
-    deadline_match = DEADLINE_PATTERN.search(text)
-    if deadline_match:
-        deadline_text = deadline_match.group(0)
-
-    apply_match = APPLY_PATTERN.search(text)
-    if apply_match:
-        apply_count_text = apply_match.group(1)
-        recruit_count_text = apply_match.group(2)
-
-    point_match = POINT_PATTERN.search(text)
-    if point_match:
-        point_text = point_match.group(1).replace(",", "")
-
-    bracket_match = BRACKET_PATTERN.search(text)
-    bracket_value = bracket_match.group(1).strip() if bracket_match else None
-    if is_region_text(bracket_value):
-        region_text = bracket_value
-
-    working = text
-
-    # 불필요한 공통 메타 제거
-    if campaign_type:
-        working = working.replace(campaign_type, "", 1)
-    if deadline_text:
-        working = working.replace(deadline_text, "", 1)
-
-    apply_match_working = APPLY_PATTERN.search(working)
-    if apply_match_working:
-        working = working[:apply_match_working.start()].strip()
-
-    if point_match:
-        working = working.replace(point_match.group(0), "").strip()
-
-    # 지역 대괄호는 제거
-    if region_text and f"[{region_text}]" in working:
-        working = working.replace(f"[{region_text}]", "", 1).strip()
-
-    working = clean_leading_labels(working)
-
-    # 방문형은 지역 뒤에 매장명 + 혜택이 오는 경우가 많음
-    if campaign_type == "방문형":
-        if working:
-            # 첫 덩어리를 제목 후보로 사용
-            parts = working.split(" ", 1)
-            campaign_title = clean_leading_labels(parts[0])
-            if len(parts) > 1:
-                benefit_text = clean_leading_labels(parts[1])
-
-            # 제목이 지역명/너무 짧은 일반어면 benefit에서 다시 뽑기
-            campaign_title, benefit_text = choose_better_title(campaign_title, benefit_text)
-    else:
-        campaign_title, benefit_text = split_title_and_benefit(working)
-        campaign_title, benefit_text = choose_better_title(campaign_title, benefit_text)
-
-    # region_text가 잘못 잡히는 경우 방지
-    if region_text and not is_region_text(region_text):
-        region_text = None
-
-    # benefit_text가 제목과 동일하면 제거
-    if campaign_title and benefit_text and campaign_title == benefit_text:
-        benefit_text = None
-
-    return {
-        "campaign_type": campaign_type,
-        "deadline_text": deadline_text,
-        "apply_count_text": apply_count_text,
-        "recruit_count_text": recruit_count_text,
-        "point_text": point_text,
-        "region_text": region_text,
-        "campaign_title": campaign_title,
-        "benefit_text": benefit_text,
-    }
+    return Campaign(
+        source_platform="ASSAVIEW",
+        source_url=source_url,
+        brand_name=brand_name,
+        title=title_text[:200],
+        thumbnail_url=thumbnail_url,
+        category=infer_category(title_text),
+        type=campaign_type,
+        channel="BLOG",
+        provided_content=provided_content,
+        recruit_count=recruit_count,
+        apply_count=apply_count,
+        apply_end_date=deadline,
+        is_guaranteed=is_guaranteed,
+        status="ACTIVE",
+    )
 
 
 class AssaViewCrawler(BaseCrawler):
+
     def crawl(self) -> list[Campaign]:
-        campaigns: list[Campaign] = []
+        all_campaigns: list[Campaign] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=settings.headless)
             page = browser.new_page()
-            page.goto(
-                settings.assaview_url,
-                wait_until="domcontentloaded",
-                timeout=settings.timeout_ms,
-            )
+
+            logger.info(f"[assaview] 목록 로드: {LIST_URL}")
+            page.goto(LIST_URL, wait_until="domcontentloaded", timeout=settings.timeout_ms)
             page.wait_for_timeout(2500)
 
-            html = page.content()
-            raw_path = save_html("assaview", html)
+            prev_count = 0
+            no_change_count = 0
+            scroll_count = 0
+            max_scrolls = 30
 
-            links = page.locator("a").all()
+            while scroll_count < max_scrolls:
+                cards = extract_cards_from_page(page)
+                current_count = len(cards)
+                logger.info(f"[assaview] 스크롤 {scroll_count}: {current_count}개")
 
-            for link in links:
-                text = link.inner_text().strip()
-                href = link.get_attribute("href")
+                if current_count == prev_count:
+                    no_change_count += 1
+                    if no_change_count >= 3:
+                        logger.info("[assaview] 더 이상 새 항목 없음 — 종료")
+                        break
+                else:
+                    no_change_count = 0
+                    prev_count = current_count
 
-                if not text:
-                    continue
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1500)
+                scroll_count += 1
 
-                # 캠페인 카드처럼 보이는 것만 수집
-                if not any(keyword in text for keyword in ["신청", "배송형", "방문형", "구매형", "기자단"]):
-                    continue
+            # 최종 수집
+            final_cards = extract_cards_from_page(page)
+            save_html("assaview_final", page.content())
 
-                parsed = parse_assaview_card_text(text)
-                campaign_url = urljoin(settings.assaview_url, href) if href else None
-
-                if not parsed["campaign_title"]:
-                    continue
-
-                campaigns.append(
-                    Campaign(
-                        source_site="assaview",
-                        source_page_url=settings.assaview_url,
-                        campaign_title=parsed["campaign_title"],
-                        campaign_url=campaign_url,
-                        campaign_type=parsed["campaign_type"],
-                        region_text=parsed["region_text"],
-                        benefit_text=parsed["benefit_text"],
-                        deadline_text=parsed["deadline_text"],
-                        apply_count_text=parsed["apply_count_text"],
-                        recruit_count_text=parsed["recruit_count_text"],
-                        point_text=parsed["point_text"],
-                        raw_snapshot_path=raw_path,
-                    )
-                )
+            for card in final_cards:
+                campaign = parse_card_data(card)
+                if campaign:
+                    all_campaigns.append(campaign)
 
             browser.close()
 
-        unique = {}
-        for item in campaigns:
-            key = (
-                item.campaign_title,
-                item.campaign_type,
-                item.deadline_text,
-                item.apply_count_text,
-            )
-            unique[key] = item
-
-        return list(unique.values())
+        unique = {c.source_url: c for c in all_campaigns if c.source_url}
+        result = list(unique.values())
+        logger.info(f"[assaview] 총 {len(result)}개 수집 완료")
+        return result
