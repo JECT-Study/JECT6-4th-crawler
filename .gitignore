@@ -12,3 +12,9 @@ data/diagnose/
 scripts/site_diagnose.py
 
 .DS_Store
+
+# 개발용 임시 파일
+check*.py
+test_*.py
+dataraw/
+EOF
