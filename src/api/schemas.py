@@ -41,9 +41,21 @@ class BlogLinkCollectRequest(BaseModel):
     )
 
 
+class BlogPostCollectItem(BaseModel):
+    url: str
+    post_url: str
+    title: str
+    thumbnail_image_url: Optional[str] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    content: str
+
+
 class BlogLinkCollectResult(BaseModel):
     source_url: str
     resolved_list_url: str
     blog_id: str
+    blog_owner_name: str
     count: int
     detail_urls: list[str]
+    posts: list[BlogPostCollectItem]

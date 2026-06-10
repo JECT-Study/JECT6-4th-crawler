@@ -11,6 +11,13 @@ class Settings(BaseModel):
 
     headless: bool = True
     timeout_ms: int = 15000
+    default_user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    )
+    request_delay_seconds: float = 0.8
+    request_retry_count: int = 3
+    request_backoff_seconds: float = 1.5
 
 
 settings = Settings()
