@@ -1,28 +1,15 @@
-import argparse
-from src.controllers.crawl_controller import CrawlController
+from fastapi import FastAPI
 
+from src.api.routers import crawl, blog, system
+from src.api.site_registry import OPENAPI_TAGS
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--site",
-        choices=["reviewnote", "gugudas", "blog", "all"],
-        default="all",
-    )
-    parser.add_argument("--url", help="Target URL for site=blog")
-    args = parser.parse_args()
+app = FastAPI(
+    title="Blog Crawler",
+    description="체험단 캠페인 크롤러 API",
+    version="1.0.0",
+    openapi_tags=OPENAPI_TAGS,
+)
 
-    controller = CrawlController()
-
-    if args.site == "reviewnote":
-        controller.run_reviewnote()
-    elif args.site == "gugudas":
-        controller.run_gugudas()
-    elif args.site == "blog":
-        controller.run_blog(source=args.url)
-    else:
-        controller.run_all()
-
-
-if __name__ == "__main__":
-    main()
+app.include_router(system.router)
+app.include_router(crawl.router)
+app.include_router(blog.router)
