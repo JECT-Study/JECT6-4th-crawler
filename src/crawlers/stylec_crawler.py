@@ -28,9 +28,9 @@ CATEGORY_MAP = {
     "식품": "FOOD", "푸드": "FOOD", "음식": "FOOD",
     "뷰티": "BEAUTY", "화장품": "BEAUTY",
     "패션": "FASHION", "의류": "FASHION",
-    "생활": "LIFE", "가전": "LIFE", "가구": "LIFE",
+    "생활": "LIVING", "가전": "LIVING", "가구": "LIVING",
     "펫": "PET", "반려": "PET",
-    "테크": "TECH", "IT": "TECH",
+    "테크": "TECH_IT", "IT": "TECH_IT",
     "여행": "TRAVEL", "숙박": "TRAVEL",
     "문화": "CULTURE",
 }

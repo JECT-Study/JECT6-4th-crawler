@@ -32,6 +32,18 @@ class ServiceInfo(BaseModel):
     supported_sites: list[SiteInfo]
 
 
+class BlogPostCrawlRequest(BaseModel):
+    blog_url: str = Field(
+        description="크롤링할 네이버 블로그 URL",
+        examples=["https://blog.naver.com/example_id"],
+    )
+
+
+class BlogPostCrawlResult(BaseModel):
+    blog_url: str
+    count: int
+
+
 class BlogLinkCollectRequest(BaseModel):
     url: str = Field(
         description="네이버 블로그 목록 페이지 URL",

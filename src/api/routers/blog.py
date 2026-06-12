@@ -1,11 +1,21 @@
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
-from src.api.schemas import BlogLinkCollectRequest, BlogLinkCollectResult
+from src.api.schemas import BlogLinkCollectRequest, BlogLinkCollectResult, BlogPostCrawlRequest, BlogPostCrawlResult
 from src.controllers.crawl_controller import CrawlController
 
 router = APIRouter(tags=["blog"])
 controller = CrawlController()
+
+
+@router.post(
+    "/crawl/blog-posts",
+    response_model=BlogPostCrawlResult,
+    summary="블로그 포스트 크롤링 및 Analyzer 전송",
+    description="블로그 URL을 받아 포스트를 크롤링하고 Analyzer에 전송합니다.",
+)
+async def crawl_blog_posts(payload: BlogPostCrawlRequest):
+    return await run_in_threadpool(controller.run_blog_posts, payload.blog_url)
 
 
 @router.post(
