@@ -7,11 +7,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # poetry 없이 pip로 설치하기 위해 requirements 방식 사용
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml ./
 
-RUN pip install --no-cache-dir poetry==1.8.3 \
-    && poetry config virtualenvs.create false \
-    && poetry install --only main --no-interaction --no-ansi
+RUN python3 -c \
+    "import tomllib, subprocess, sys; \
+    f=open('pyproject.toml','rb'); data=tomllib.load(f); f.close(); \
+    deps=data.get('project',{}).get('dependencies',[]); \
+    clean=[d.replace(' (','').replace(')','') for d in deps]; \
+    subprocess.check_call([sys.executable,'-m','pip','install','--no-cache-dir']+clean)"
 
 # Playwright 브라우저 설치
 RUN playwright install chromium && playwright install-deps chromium
