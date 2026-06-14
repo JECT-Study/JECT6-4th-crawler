@@ -4,7 +4,7 @@ import requests
 from loguru import logger
 
 from src.api.schemas import BlogLinkCollectResult, BlogPostCrawlResult, CrawlResult
-from src.clients.analyzer_client import send_blog_post, send_campaign
+from src.clients.stream_client import publish_blog_post, publish_campaign
 from src.crawlers.assaview_crawler import AssaViewCrawler
 from src.crawlers.assaview_detail_crawler import AssaviewDetailCrawler
 from src.crawlers.stylec_crawler import StyleCCrawler
@@ -62,7 +62,7 @@ def _send_to_analyzer(campaigns: list[Campaign]) -> None:
             campaign.provided_content,
             campaign.mission,
         ]))
-        send_campaign(
+        publish_campaign(
             source_url=campaign.source_url,
             title=campaign.title,
             content=content or campaign.title,
@@ -125,10 +125,7 @@ class CrawlController:
         logger.info(f"[blog-posts] 포스트 크롤링 시작: {blog_url}")
         result = NaverBlogLinkCrawler().crawl(blog_url)
         for post in result.posts:
-            try:
-                send_blog_post(url=post.post_url, title=post.title, content=post.content)
-            except Exception as exc:
-                logger.warning("[blog-posts] 포스트 전송 실패 (best-effort) url={}: {}", post.post_url, exc)
+            publish_blog_post(url=post.post_url, title=post.title, content=post.content)
         logger.info(f"[blog-posts] 완료: {len(result.posts)}개 포스트")
         return BlogPostCrawlResult(blog_url=blog_url, count=len(result.posts))
 
