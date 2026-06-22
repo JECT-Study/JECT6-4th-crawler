@@ -21,45 +21,116 @@ from src.crawlers.stylec_detail_crawler import StylecDetailCrawler
 from src.crawlers.naver_blog_link_crawler import NaverBlogLinkCrawler
 from src.models.campaign import Campaign
 from src.repositories.campaign_repository import save_campaigns_csv
+from src.services.date_normalizer import normalize_spring_date
+from src.services.region_mapper import resolve_region_ids
 from src.views.cli_view import print_campaigns
 
 _SPRING_API_URL = os.getenv("SPRING_API_URL", "http://localhost:8080")
+_SPRING_BULK_CHUNK_SIZE = int(os.getenv("SPRING_BULK_CHUNK_SIZE", "100"))
+
+
+def _enrich_campaign_region_ids(campaigns: list[Campaign]) -> list[Campaign]:
+    return [_enrich_campaign_region_id(campaign) for campaign in campaigns]
+
+
+def _enrich_campaign_region_id(campaign: Campaign) -> Campaign:
+    region_ids = resolve_region_ids(
+        campaign.region_depth1,
+        campaign.region_depth2,
+    )
+
+    update = {}
+    if campaign.parent_region_id is None and region_ids.parent_region_id is not None:
+        update["parent_region_id"] = region_ids.parent_region_id
+    if campaign.child_region_id is None and region_ids.child_region_id is not None:
+        update["child_region_id"] = region_ids.child_region_id
+    if not campaign.region_depth1 and region_ids.parent_name:
+        update["region_depth1"] = region_ids.parent_name
+    if not campaign.region_depth2 and region_ids.child_name:
+        update["region_depth2"] = region_ids.child_name
+
+    return campaign.model_copy(update=update) if update else campaign
+
+
+def _build_campaign_payload(campaign: Campaign) -> dict:
+    region_ids = resolve_region_ids(
+        campaign.region_depth1,
+        campaign.region_depth2,
+    )
+
+    parent_region_id = campaign.parent_region_id or region_ids.parent_region_id
+    child_region_id = campaign.child_region_id or region_ids.child_region_id
+
+    return {
+        "sourcePlatform": campaign.source_platform,
+        "brandName": campaign.brand_name,
+        "title": campaign.title,
+        "thumbnailUrl": campaign.thumbnail_url,
+        "category": campaign.category,
+        "type": campaign.type,
+        "channel": campaign.channel,
+        "region": campaign.region_depth1 or region_ids.parent_name,
+        "parentRegionId": parent_region_id,
+        "childRegionId": child_region_id,
+        "providedContent": campaign.provided_content,
+        "recruitCount": campaign.recruit_count,
+        "applyStartDate": normalize_spring_date(campaign.apply_start_date),
+        "applyEndDate": normalize_spring_date(campaign.apply_end_date),
+        "mission": campaign.mission,
+        "sourceUrl": campaign.source_url,
+        "isGuaranteed": campaign.is_guaranteed,
+    }
 
 
 def _send_to_spring(campaigns: list[Campaign]) -> None:
     if not campaigns:
         return
-    payload = {
-        "campaigns": [
-            {
-                "sourcePlatform": c.source_platform,
-                "brandName": c.brand_name,
-                "title": c.title,
-                "thumbnailUrl": c.thumbnail_url,
-                "category": c.category,
-                "type": c.type,
-                "channel": c.channel,
-                "region": c.region_depth1,
-                "providedContent": c.provided_content,
-                "recruitCount": c.recruit_count,
-                "applyStartDate": c.apply_start_date,
-                "applyEndDate": c.apply_end_date,
-                "mission": c.mission,
-                "sourceUrl": c.source_url,
-                "isGuaranteed": c.is_guaranteed,
-            }
-            for c in campaigns
-            if c.source_url
-        ]
-    }
-    try:
-        url = f"{_SPRING_API_URL}/internal/campaigns/bulk"
-        resp = requests.post(url, json=payload, timeout=15)
-        resp.raise_for_status()
-        saved = resp.json().get("data", {}).get("saved", "?")
-        logger.info("spring_client: campaign bulk upsert 완료 saved={}", saved)
-    except Exception as exc:
-        logger.warning("spring_client: /internal/campaigns/bulk 실패 (best-effort) — {}", exc)
+
+    campaign_payloads = [
+        _build_campaign_payload(c)
+        for c in campaigns
+        if c.source_url
+    ]
+    if not campaign_payloads:
+        return
+
+    url = f"{_SPRING_API_URL}/internal/campaigns/bulk"
+    chunk_size = max(_SPRING_BULK_CHUNK_SIZE, 1)
+    total_saved = 0
+    total_chunks = -(-len(campaign_payloads) // chunk_size)
+
+    for chunk_index, start in enumerate(range(0, len(campaign_payloads), chunk_size), 1):
+        chunk = campaign_payloads[start:start + chunk_size]
+        payload = {"campaigns": chunk}
+
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+            saved = resp.json().get("data", {}).get("saved", len(chunk))
+            if isinstance(saved, int):
+                total_saved += saved
+            logger.info(
+                "spring_client: campaign bulk upsert 완료 chunk={}/{} size={} saved={}",
+                chunk_index,
+                total_chunks,
+                len(chunk),
+                saved,
+            )
+        except Exception as exc:
+            logger.warning(
+                "spring_client: /internal/campaigns/bulk 실패 chunk={}/{} size={} (best-effort) — {}",
+                chunk_index,
+                total_chunks,
+                len(chunk),
+                exc,
+            )
+
+    logger.info(
+        "spring_client: campaign bulk upsert 종료 chunks={} requested={} saved={}",
+        total_chunks,
+        len(campaign_payloads),
+        total_saved,
+    )
 
 
 def _send_to_analyzer(campaigns: list[Campaign]) -> None:
@@ -80,11 +151,12 @@ def _send_to_analyzer(campaigns: list[Campaign]) -> None:
 
 class CrawlController:
 
-    def run_stylec(self, save_csv: bool = True) -> CrawlResult:
-        logger.info("[stylec] 목록 크롤링 시작")
-        campaigns = StyleCCrawler().crawl()
+    def run_stylec(self, save_csv: bool = True, max_campaigns: int | None = None) -> CrawlResult:
+        logger.info(f"[stylec] 목록 크롤링 시작 max_campaigns={max_campaigns}")
+        campaigns = StyleCCrawler().crawl(max_campaigns=max_campaigns)
         logger.info(f"[stylec] 목록 {len(campaigns)}개 → 상세 크롤링")
         campaigns = StylecDetailCrawler().crawl(campaigns)
+        campaigns = _enrich_campaign_region_ids(campaigns)
 
         print_campaigns(campaigns)
         output_file = None
@@ -102,11 +174,12 @@ class CrawlController:
             campaigns=campaigns,
         )
 
-    def run_assaview(self, save_csv: bool = True) -> CrawlResult:
-        logger.info("[assaview] 목록 크롤링 시작")
-        campaigns = AssaViewCrawler().crawl()
+    def run_assaview(self, save_csv: bool = True, max_campaigns: int | None = None) -> CrawlResult:
+        logger.info(f"[assaview] 목록 크롤링 시작 max_campaigns={max_campaigns}")
+        campaigns = AssaViewCrawler().crawl(max_campaigns=max_campaigns)
         logger.info(f"[assaview] 목록 {len(campaigns)}개 → 상세 크롤링")
         campaigns = AssaviewDetailCrawler().crawl(campaigns)
+        campaigns = _enrich_campaign_region_ids(campaigns)
 
         print_campaigns(campaigns)
         output_file = None
@@ -124,10 +197,10 @@ class CrawlController:
             campaigns=campaigns,
         )
 
-    def run_all(self, save_csv: bool = True) -> list[CrawlResult]:
+    def run_all(self, save_csv: bool = True, max_campaigns: int | None = None) -> list[CrawlResult]:
         return [
-            self.run_stylec(save_csv),
-            self.run_assaview(save_csv),
+            self.run_stylec(save_csv, max_campaigns=max_campaigns),
+            self.run_assaview(save_csv, max_campaigns=max_campaigns),
         ]
 
     def run_blog_posts(

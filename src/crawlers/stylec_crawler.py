@@ -131,7 +131,7 @@ def parse_item(item: dict) -> Campaign | None:
 
 class StyleCCrawler(BaseCrawler):
 
-    def crawl(self) -> list[Campaign]:
+    def crawl(self, max_campaigns: int | None = None) -> list[Campaign]:
         all_items: list[Campaign] = []
 
         with sync_playwright() as p:
@@ -183,11 +183,20 @@ class StyleCCrawler(BaseCrawler):
                     if campaign:
                         all_items.append(campaign)
 
+                    if max_campaigns is not None and len(all_items) >= max_campaigns:
+                        logger.info(f"[stylec] 최대 수집 개수 도달: {max_campaigns}개")
+                        break
+
+                if max_campaigns is not None and len(all_items) >= max_campaigns:
+                    break
+
                 page.wait_for_timeout(500)
 
             browser.close()
 
         unique = {c.source_url: c for c in all_items if c.source_url}
         result = list(unique.values())
+        if max_campaigns is not None:
+            result = result[:max_campaigns]
         logger.info(f"[stylec] 총 {len(result)}개 수집 완료")
         return result

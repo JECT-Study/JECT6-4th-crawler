@@ -21,6 +21,8 @@ class Campaign(BaseModel):
     # 지역 (방문형만)
     region_depth1: Optional[str] = None
     region_depth2: Optional[str] = None
+    parent_region_id: Optional[int] = None
+    child_region_id: Optional[int] = None
 
     # 제공 내용
     provided_content: Optional[str] = None

@@ -8,13 +8,17 @@ router = APIRouter(tags=["campaign"])
 controller = CrawlController()
 
 
-async def _crawl_site_handler(site: CrawlSite, save_csv: bool) -> CrawlResult:
+async def _crawl_site_handler(
+    site: CrawlSite,
+    save_csv: bool,
+    max_campaigns: int | None,
+) -> CrawlResult:
     handler = controller.run_assaview if site == CrawlSite.assaview else controller.run_stylec
-    return await run_in_threadpool(handler, save_csv)
+    return await run_in_threadpool(handler, save_csv, max_campaigns)
 
 
-async def _crawl_all_handler(save_csv: bool) -> CrawlAllResult:
-    results = await run_in_threadpool(controller.run_all, save_csv)
+async def _crawl_all_handler(save_csv: bool, max_campaigns: int | None) -> CrawlAllResult:
+    results = await run_in_threadpool(controller.run_all, save_csv, max_campaigns)
     return {"results": results}
 
 
@@ -28,8 +32,9 @@ async def _crawl_all_handler(save_csv: bool) -> CrawlAllResult:
 async def crawl_site_legacy(
     site: CrawlSite,
     save_csv: bool = Query(default=True, description="CSV 저장 여부"),
+    max_campaigns: int | None = Query(default=None, ge=1, description="테스트용 최대 수집 캠페인 수"),
 ):
-    return await _crawl_site_handler(site, save_csv)
+    return await _crawl_site_handler(site, save_csv, max_campaigns)
 
 
 @router.post(
@@ -44,8 +49,9 @@ async def crawl_site_legacy(
 async def crawl_site(
     site: CrawlSite,
     save_csv: bool = Query(default=True, description="크롤링 결과를 CSV 파일로 저장할지 여부입니다."),
+    max_campaigns: int | None = Query(default=None, ge=1, description="테스트용 최대 수집 캠페인 수입니다."),
 ):
-    return await _crawl_site_handler(site, save_csv)
+    return await _crawl_site_handler(site, save_csv, max_campaigns)
 
 
 @router.post(
@@ -56,8 +62,9 @@ async def crawl_site(
 )
 async def crawl_all_legacy(
     save_csv: bool = Query(default=True, description="CSV 저장 여부"),
+    max_campaigns: int | None = Query(default=None, ge=1, description="테스트용 사이트별 최대 수집 캠페인 수"),
 ):
-    return await _crawl_all_handler(save_csv)
+    return await _crawl_all_handler(save_csv, max_campaigns)
 
 
 @router.post(
@@ -68,5 +75,6 @@ async def crawl_all_legacy(
 )
 async def crawl_all(
     save_csv: bool = Query(default=True, description="크롤링 결과를 CSV 파일로 저장할지 여부입니다."),
+    max_campaigns: int | None = Query(default=None, ge=1, description="테스트용 사이트별 최대 수집 캠페인 수입니다."),
 ):
-    return await _crawl_all_handler(save_csv)
+    return await _crawl_all_handler(save_csv, max_campaigns)
