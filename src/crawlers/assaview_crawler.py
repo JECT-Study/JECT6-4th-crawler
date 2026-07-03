@@ -1,4 +1,5 @@
 import re
+from datetime import date, timedelta
 from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright, Page
@@ -20,6 +21,22 @@ TYPE_MAP = {
     "기자단": "REPORTER",
     "리뷰형": "REVIEW",
 }
+
+
+def _resolve_deadline_date(deadline_text: str | None) -> str | None:
+    """목록에 노출되는 상대적 마감 표기("3일 남음" 등)를 실제 날짜(YYYY-MM-DD)로 변환한다.
+
+    상세 페이지의 모집기간 영역이 더 이상 정적 HTML에 존재하지 않아(사이트 구조 변경),
+    절대 날짜를 얻을 방법이 이 상대 표기뿐이다.
+    """
+    if not deadline_text:
+        return None
+    if deadline_text in ("오늘마감", "마감임박"):
+        return date.today().isoformat()
+    m = re.match(r"(\d+)일 남음", deadline_text)
+    if m:
+        return (date.today() + timedelta(days=int(m.group(1)))).isoformat()
+    return None
 
 CATEGORY_MAP = {
     "식품": "FOOD", "푸드": "FOOD", "음식": "FOOD", "빵": "FOOD", "쿠키": "FOOD",
@@ -162,7 +179,7 @@ def parse_card_data(card: dict) -> Campaign | None:
         provided_content=provided_content,
         recruit_count=recruit_count,
         apply_count=apply_count,
-        apply_end_date=deadline,
+        apply_end_date=_resolve_deadline_date(deadline),
         is_guaranteed=is_guaranteed,
         status="ACTIVE",
     )
