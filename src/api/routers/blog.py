@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 
 from src.api.schemas import (
@@ -19,10 +19,15 @@ controller = CrawlController()
     "/crawl/blog-posts",
     response_model=BlogPostCrawlResult,
     summary="블로그 포스트 크롤링 및 Analyzer 전송",
-    description="블로그 URL을 받아 포스트를 크롤링하고 Analyzer에 전송합니다.",
+    description=(
+        "블로그 URL을 받아 포스트를 크롤링하고 Analyzer에 전송합니다. "
+        "크롤링은 백그라운드에서 진행되며 이 엔드포인트는 즉시 응답합니다 "
+        "(호출자는 이 응답을 기다리지 않는 fire-and-forget 트리거로 사용함). "
+        "count는 실제 크롤링 완료 전 값이라 항상 -1(집계 불가)로 반환됩니다."
+    ),
 )
-async def crawl_blog_posts(payload: BlogPostCrawlRequest):
-    return await run_in_threadpool(
+async def crawl_blog_posts(payload: BlogPostCrawlRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(
         controller.run_blog_posts,
         payload.blog_url,
         payload.user_id,
@@ -31,6 +36,7 @@ async def crawl_blog_posts(payload: BlogPostCrawlRequest):
         payload.analysis_mode,
         payload.batch_id,
     )
+    return BlogPostCrawlResult(blog_url=payload.blog_url, count=-1)
 
 
 @router.post(
