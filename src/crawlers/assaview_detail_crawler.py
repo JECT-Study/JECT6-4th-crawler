@@ -102,11 +102,13 @@ def parse_assaview_detail(html: str, source_url: str) -> dict:
             )
 
         elif "미션 가이드" in label:
-            result["mission"] = extract_multiline_section(
+            mission_text = extract_multiline_section(
                 lines,
                 start_keyword="미션 가이드",
                 stop_keywords=["제목 키워드", "본문 키워드", "유의사항", "캠페인 신청하기"],
             )
+            # DB 컬럼이 VARCHAR(255)라 초과분은 잘라낸다.
+            result["mission"] = mission_text[:255] if mission_text else mission_text
 
     return result
 
