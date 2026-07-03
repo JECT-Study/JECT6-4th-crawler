@@ -101,6 +101,10 @@ def parse_card_data(card: dict) -> Campaign | None:
 
     # 썸네일
     thumbnail_url = urljoin(BASE_URL, thumb_src) if thumb_src else None
+    # 일부 파일명이 유니코드 바이트 시퀀스로 인코딩되어 DB 컬럼(VARCHAR(255))을 초과하는 경우가 있다.
+    # 자르면 깨진 URL이 되므로 초과 시 통째로 비운다.
+    if thumbnail_url and len(thumbnail_url) > 255:
+        thumbnail_url = None
 
     # 캠페인 타입
     type_match = re.search(r"(배송형|구매형|방문형|기자단|리뷰형)", full_text)
